@@ -1,0 +1,8 @@
+# Everything is excluded by default so that an unrelated new file never ends up
+# in the build context and invalidates the cache.
+*
+
+# Only what `go build` actually needs.
+!go.mod
+!go.sum
+!*.go
