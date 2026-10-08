@@ -1,0 +1,251 @@
+/*
+Copyright © 2026 kota2and3kan
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+	"unicode"
+)
+
+const (
+	defaultListenAddr  = "localhost:8080"
+	defaultPort        = "8080"
+	defaultAPIVersion  = "v1"
+	defaultPath        = "api"
+	pathListSeparator  = ","
+	forbiddenPathChars = "{}?#"
+)
+
+type config struct {
+	ListenAddr      string
+	Paths           []string
+	APIVersion      string
+	LogExcludePaths []string
+}
+
+func getEnv(key, def string) string {
+	if v, ok := os.LookupEnv(key); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	return def
+}
+
+func normalizePath(raw string) (string, error) {
+	p := strings.Trim(strings.TrimSpace(raw), "/")
+	if p == "" {
+		return "", errors.New("path is empty")
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "" {
+			return "", fmt.Errorf("path %q has an empty segment", raw)
+		}
+		if strings.ContainsFunc(seg, isUnsafePathRune) {
+			return "", fmt.Errorf("path segment %q must not contain whitespace or control characters", seg)
+		}
+		if strings.ContainsAny(seg, forbiddenPathChars) {
+			return "", fmt.Errorf("path segment %q must not contain any of %q", seg, forbiddenPathChars)
+		}
+	}
+	return p, nil
+}
+
+func isUnsafePathRune(r rune) bool {
+	return unicode.IsSpace(r) || unicode.IsControl(r)
+}
+
+func normalizeListenAddr(raw string) (string, error) {
+	if !strings.Contains(raw, ":") {
+		raw = net.JoinHostPort(raw, defaultPort)
+	}
+	host, port, err := net.SplitHostPort(raw)
+	if err != nil {
+		return "", err
+	}
+	if port == "" {
+		port = defaultPort
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 0 || n > 65535 {
+		return "", fmt.Errorf("address %s: invalid port %q", raw, port)
+	}
+	return net.JoinHostPort(host, port), nil
+}
+
+func loadConfig() (config, error) {
+	listenAddr, err := normalizeListenAddr(getEnv("SIMPLE_API_SERVER_LISTEN_ADDR", defaultListenAddr))
+	if err != nil {
+		return config{}, fmt.Errorf("SIMPLE_API_SERVER_LISTEN_ADDR: %w", err)
+	}
+
+	version, err := normalizePath(getEnv("SIMPLE_API_SERVER_API_VERSION", defaultAPIVersion))
+	if err != nil {
+		return config{}, fmt.Errorf("SIMPLE_API_SERVER_API_VERSION: %w", err)
+	}
+
+	paths, err := parsePathList("SIMPLE_API_SERVER_PATH_LIST", getEnv("SIMPLE_API_SERVER_PATH_LIST", defaultPath))
+	if err != nil {
+		return config{}, err
+	}
+	if len(paths) == 0 {
+		return config{}, errors.New("SIMPLE_API_SERVER_PATH_LIST: no path given")
+	}
+
+	logExcludePaths, err := parsePathList("SIMPLE_API_SERVER_LOG_EXCLUDE_PATH_LIST", getEnv("SIMPLE_API_SERVER_LOG_EXCLUDE_PATH_LIST", ""))
+	if err != nil {
+		return config{}, err
+	}
+
+	return config{
+		ListenAddr:      listenAddr,
+		Paths:           paths,
+		APIVersion:      version,
+		LogExcludePaths: logExcludePaths,
+	}, nil
+}
+
+func parsePathList(key, raw string) ([]string, error) {
+	seen := map[string]bool{}
+	var paths []string
+	for _, entry := range strings.Split(raw, pathListSeparator) {
+		if strings.TrimSpace(entry) == "" {
+			continue
+		}
+		p, err := normalizePath(entry)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", key, err)
+		}
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		paths = append(paths, p)
+	}
+	return paths, nil
+}
+
+type apiResponse struct {
+	API     string `json:"API"`
+	Version string `json:"Version"`
+}
+
+func apiHandler(logger *log.Logger, version, name string) http.HandlerFunc {
+	body, _ := json.Marshal(apiResponse{API: name, Version: version})
+	body = append(body, '\n')
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := w.Write(body); err != nil {
+			logger.Printf("write error: %s %s: %v", r.RemoteAddr, r.URL.Path, err)
+		}
+	}
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	n, err := r.ResponseWriter.Write(b)
+	r.bytes += n
+	return n, err
+}
+
+func (r *statusRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
+}
+
+func accessLog(logger *log.Logger, cfg config, next http.Handler) http.Handler {
+	excluded := map[string]bool{}
+	for _, p := range cfg.LogExcludePaths {
+		excluded[routePath(cfg.APIVersion, p)] = true
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		if excluded[r.URL.Path] {
+			return
+		}
+		logger.Printf("%s %s %s %s %d %dB %s %q",
+			r.RemoteAddr, r.Method, r.URL.Path, r.Proto,
+			rec.status, rec.bytes, time.Since(start), r.UserAgent())
+	})
+}
+
+func routePath(version, path string) string {
+	return "/" + version + "/" + path
+}
+
+func newMux(logger *log.Logger, cfg config) *http.ServeMux {
+	mux := http.NewServeMux()
+	for _, p := range cfg.Paths {
+		route := routePath(cfg.APIVersion, p)
+		mux.HandleFunc(route, apiHandler(logger, cfg.APIVersion, p))
+		logger.Printf("registered endpoint: %s", route)
+	}
+	return mux
+}
+
+func main() {
+	logger := log.New(os.Stdout, "", log.LstdFlags)
+	cfg, err := loadConfig()
+	if err != nil {
+		logger.Fatalf("invalid configuration: %v", err)
+	}
+
+	mux := newMux(logger, cfg)
+
+	srv := &http.Server{
+		Addr:              cfg.ListenAddr,
+		Handler:           accessLog(logger, cfg, mux),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	go func() {
+		logger.Printf("listening on http://%s", srv.Addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Fatalf("server error: %v", err)
+		}
+	}()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	<-ctx.Done()
+
+	logger.Println("shutting down...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		logger.Printf("shutdown error: %v", err)
+	}
+}
