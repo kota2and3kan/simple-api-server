@@ -17,14 +17,26 @@ package main
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"log"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNormalizePath(t *testing.T) {
@@ -92,6 +104,8 @@ var envKeys = []string{
 	"SIMPLE_API_SERVER_API_VERSION",
 	"SIMPLE_API_SERVER_PATH_LIST",
 	"SIMPLE_API_SERVER_LOG_EXCLUDE_PATH_LIST",
+	"SIMPLE_API_SERVER_TLS_CERT_FILE",
+	"SIMPLE_API_SERVER_TLS_KEY_FILE",
 }
 
 func TestLoadConfig(t *testing.T) {
@@ -273,6 +287,31 @@ func TestLoadConfig(t *testing.T) {
 			env:             map[string]string{"SIMPLE_API_SERVER_PATH_LIST": "a?b"},
 			wantErrContains: "SIMPLE_API_SERVER_PATH_LIST",
 		},
+
+		{
+			name: "a tls key pair is read as a pair",
+			env: map[string]string{
+				"SIMPLE_API_SERVER_TLS_CERT_FILE": " /tls/tls.crt ",
+				"SIMPLE_API_SERVER_TLS_KEY_FILE":  " /tls/tls.key ",
+			},
+			want: config{
+				ListenAddr:  "localhost:8080",
+				APIVersion:  "v1",
+				Paths:       []string{"api"},
+				TLSCertFile: "/tls/tls.crt",
+				TLSKeyFile:  "/tls/tls.key",
+			},
+		},
+		{
+			name:            "a certificate without a key is rejected",
+			env:             map[string]string{"SIMPLE_API_SERVER_TLS_CERT_FILE": "/tls/tls.crt"},
+			wantErrContains: "SIMPLE_API_SERVER_TLS_KEY_FILE",
+		},
+		{
+			name:            "a key without a certificate is rejected",
+			env:             map[string]string{"SIMPLE_API_SERVER_TLS_KEY_FILE": "/tls/tls.key"},
+			wantErrContains: "SIMPLE_API_SERVER_TLS_CERT_FILE",
+		},
 	}
 
 	for _, tt := range tests {
@@ -295,7 +334,8 @@ func TestLoadConfig(t *testing.T) {
 			if err != nil {
 				t.Fatalf("loadConfig() returned an unexpected error: %v", err)
 			}
-			if got.ListenAddr != tt.want.ListenAddr || got.APIVersion != tt.want.APIVersion {
+			if got.ListenAddr != tt.want.ListenAddr || got.APIVersion != tt.want.APIVersion ||
+				got.TLSCertFile != tt.want.TLSCertFile || got.TLSKeyFile != tt.want.TLSKeyFile {
 				t.Errorf("loadConfig() = %+v; want %+v", got, tt.want)
 			}
 			if !slices.Equal(got.Paths, tt.want.Paths) {
@@ -452,5 +492,187 @@ func TestAccessLogExcludesConfiguredPaths(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("%q is missing from the access log:\n%s", want, got)
 		}
+	}
+}
+
+func writeTestKeyPair(t *testing.T) (certFile, keyFile string, roots *x509.CertPool) {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generating a key: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "simple-api-server test"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		DNSNames:              []string{"localhost"},
+		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("creating a certificate: %v", err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshaling the key: %v", err)
+	}
+
+	dir := t.TempDir()
+	certFile = filepath.Join(dir, "tls.crt")
+	keyFile = filepath.Join(dir, "tls.key")
+	write := func(name string, block *pem.Block) {
+		if err := os.WriteFile(name, pem.EncodeToMemory(block), 0o600); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+	}
+	write(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: der})
+	write(keyFile, &pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parsing the certificate: %v", err)
+	}
+	roots = x509.NewCertPool()
+	roots.AddCert(cert)
+
+	return certFile, keyFile, roots
+}
+
+func TestNewTLSConfig(t *testing.T) {
+	t.Parallel()
+
+	certFile, keyFile, _ := writeTestKeyPair(t)
+
+	t.Run("without a key pair the server stays on plain http", func(t *testing.T) {
+		t.Parallel()
+
+		got, err := newTLSConfig(config{ListenAddr: "localhost:8080"})
+		if err != nil {
+			t.Fatalf("newTLSConfig() returned an unexpected error: %v", err)
+		}
+		if got != nil {
+			t.Errorf("newTLSConfig() = %+v; want nil", got)
+		}
+	})
+
+	t.Run("a key pair is loaded", func(t *testing.T) {
+		t.Parallel()
+
+		got, err := newTLSConfig(config{TLSCertFile: certFile, TLSKeyFile: keyFile})
+		if err != nil {
+			t.Fatalf("newTLSConfig() returned an unexpected error: %v", err)
+		}
+		if got == nil {
+			t.Fatal("newTLSConfig() = nil; want a TLS configuration")
+		}
+		if len(got.Certificates) != 1 {
+			t.Errorf("newTLSConfig().Certificates has %d entries; want 1", len(got.Certificates))
+		}
+		if got.MinVersion != tls.VersionTLS12 {
+			t.Errorf("newTLSConfig().MinVersion = %#x; want %#x", got.MinVersion, tls.VersionTLS12)
+		}
+	})
+
+	t.Run("a missing certificate file is reported", func(t *testing.T) {
+		t.Parallel()
+
+		got, err := newTLSConfig(config{TLSCertFile: filepath.Join(t.TempDir(), "absent.crt"), TLSKeyFile: keyFile})
+		if err == nil {
+			t.Fatalf("newTLSConfig() = %+v, nil; want an error", got)
+		}
+		if !strings.Contains(err.Error(), "TLS key pair") {
+			t.Errorf("newTLSConfig() error = %q; want it to contain %q", err, "TLS key pair")
+		}
+	})
+
+	t.Run("a certificate that does not match the key is reported", func(t *testing.T) {
+		t.Parallel()
+
+		_, otherKeyFile, _ := writeTestKeyPair(t)
+
+		if got, err := newTLSConfig(config{TLSCertFile: certFile, TLSKeyFile: otherKeyFile}); err == nil {
+			t.Fatalf("newTLSConfig() = %+v, nil; want an error", got)
+		}
+	})
+}
+
+func TestServerServesHTTPSWithTheConfiguredKeyPair(t *testing.T) {
+	t.Parallel()
+
+	certFile, keyFile, roots := writeTestKeyPair(t)
+	cfg := config{
+		APIVersion:  "v1",
+		Paths:       []string{"api"},
+		TLSCertFile: certFile,
+		TLSKeyFile:  keyFile,
+	}
+
+	tlsConfig, err := newTLSConfig(cfg)
+	if err != nil {
+		t.Fatalf("newTLSConfig() returned an unexpected error: %v", err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listening: %v", err)
+	}
+	srv := &http.Server{
+		Handler:           newMux(log.New(io.Discard, "", 0), cfg),
+		ReadHeaderTimeout: 5 * time.Second,
+		TLSConfig:         tlsConfig,
+		ErrorLog:          log.New(io.Discard, "", 0),
+	}
+	go func() { _ = srv.ServeTLS(ln, "", "") }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	addr := ln.Addr().String()
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
+		},
+	}
+
+	resp, err := client.Get("https://" + addr + "/v1/api")
+	if err != nil {
+		t.Fatalf("GET https://%s/v1/api: %v", addr, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET https://%s/v1/api: status = %d; want %d", addr, resp.StatusCode, http.StatusOK)
+	}
+	if resp.TLS == nil {
+		t.Error("the response did not come over TLS")
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading the body: %v", err)
+	}
+	if want := "{\"API\":\"api\",\"Version\":\"v1\"}\n"; string(body) != want {
+		t.Errorf("GET https://%s/v1/api: body = %q; want %q", addr, body, want)
+	}
+
+	plain, err := client.Get("http://" + addr + "/v1/api")
+	if err != nil {
+		t.Fatalf("GET http://%s/v1/api: %v", addr, err)
+	}
+	defer func() { _ = plain.Body.Close() }()
+
+	if plain.StatusCode != http.StatusBadRequest {
+		t.Errorf("GET http://%s/v1/api: status = %d; want %d", addr, plain.StatusCode, http.StatusBadRequest)
+	}
+	plainBody, err := io.ReadAll(plain.Body)
+	if err != nil {
+		t.Fatalf("reading the body: %v", err)
+	}
+	if strings.Contains(string(plainBody), "\"API\"") {
+		t.Errorf("GET http://%s/v1/api: the endpoint answered over plain http: %q", addr, plainBody)
 	}
 }

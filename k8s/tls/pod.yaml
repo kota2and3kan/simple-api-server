@@ -1,0 +1,62 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: simple-api-server-tls
+  labels:
+    app.kubernetes.io/name: simple-api-server-tls
+spec:
+  containers:
+    - name: simple-api-server
+      image: ghcr.io/kota2and3kan/simple-api-server:latest
+      ports:
+        - name: https
+          containerPort: 8443
+      env:
+        - name: SIMPLE_API_SERVER_LISTEN_ADDR
+          value: 0.0.0.0:8443
+        - name: SIMPLE_API_SERVER_PATH_LIST
+          value: payment,inventory,shipping,healthz
+        - name: SIMPLE_API_SERVER_LOG_EXCLUDE_PATH_LIST
+          value: healthz
+        - name: SIMPLE_API_SERVER_TLS_CERT_FILE
+          value: /etc/simple-api-server/tls/tls.crt
+        - name: SIMPLE_API_SERVER_TLS_KEY_FILE
+          value: /etc/simple-api-server/tls/tls.key
+      volumeMounts:
+        - name: tls
+          mountPath: /etc/simple-api-server/tls
+          readOnly: true
+      readinessProbe:
+        httpGet:
+          path: /v1/healthz
+          port: https
+          scheme: HTTPS
+      livenessProbe:
+        httpGet:
+          path: /v1/healthz
+          port: https
+          scheme: HTTPS
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 64Mi
+      securityContext:
+        runAsNonRoot: true
+        # 65532 is the uid of the "nonroot" user defined in
+        # gcr.io/distroless/static-debian12:nonroot. The image sets USER by
+        # name, which kubelet cannot resolve, so runAsNonRoot needs it here.
+        runAsUser: 65532
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+        seccompProfile:
+          type: RuntimeDefault
+  volumes:
+    - name: tls
+      secret:
+        secretName: simple-api-server-tls
+        defaultMode: 0444

@@ -21,7 +21,7 @@ COPY --from=build /out/simple-api-server /simple-api-server
 
 ENV SIMPLE_API_SERVER_LISTEN_ADDR=0.0.0.0:8080
 
-EXPOSE 8080
+EXPOSE 8080 8443
 
 USER nonroot:nonroot
 

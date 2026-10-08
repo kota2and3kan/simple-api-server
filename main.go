@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,6 +47,12 @@ type config struct {
 	Paths           []string
 	APIVersion      string
 	LogExcludePaths []string
+	TLSCertFile     string
+	TLSKeyFile      string
+}
+
+func (c config) tlsEnabled() bool {
+	return c.TLSCertFile != "" && c.TLSKeyFile != ""
 }
 
 func getEnv(key, def string) string {
@@ -119,11 +126,36 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 
+	certFile := getEnv("SIMPLE_API_SERVER_TLS_CERT_FILE", "")
+	keyFile := getEnv("SIMPLE_API_SERVER_TLS_KEY_FILE", "")
+	switch {
+	case certFile != "" && keyFile == "":
+		return config{}, errors.New("SIMPLE_API_SERVER_TLS_KEY_FILE: must be set together with SIMPLE_API_SERVER_TLS_CERT_FILE")
+	case certFile == "" && keyFile != "":
+		return config{}, errors.New("SIMPLE_API_SERVER_TLS_CERT_FILE: must be set together with SIMPLE_API_SERVER_TLS_KEY_FILE")
+	}
+
 	return config{
 		ListenAddr:      listenAddr,
 		Paths:           paths,
 		APIVersion:      version,
 		LogExcludePaths: logExcludePaths,
+		TLSCertFile:     certFile,
+		TLSKeyFile:      keyFile,
+	}, nil
+}
+
+func newTLSConfig(cfg config) (*tls.Config, error) {
+	if !cfg.tlsEnabled() {
+		return nil, nil
+	}
+	cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("TLS key pair: %w", err)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
 	}, nil
 }
 
@@ -223,17 +255,30 @@ func main() {
 		logger.Fatalf("invalid configuration: %v", err)
 	}
 
+	tlsConfig, err := newTLSConfig(cfg)
+	if err != nil {
+		logger.Fatalf("invalid configuration: %v", err)
+	}
+
 	mux := newMux(logger, cfg)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           accessLog(logger, cfg, mux),
 		ReadHeaderTimeout: 5 * time.Second,
+		TLSConfig:         tlsConfig,
 	}
 
 	go func() {
-		logger.Printf("listening on http://%s", srv.Addr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		var err error
+		if cfg.tlsEnabled() {
+			logger.Printf("listening on https://%s", srv.Addr)
+			err = srv.ListenAndServeTLS("", "")
+		} else {
+			logger.Printf("listening on http://%s", srv.Addr)
+			err = srv.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Fatalf("server error: %v", err)
 		}
 	}()
