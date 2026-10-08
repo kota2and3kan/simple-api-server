@@ -6,6 +6,11 @@ on:
       - main
     tags:
       - v*
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - 'k8s/**'
   workflow_dispatch:
 
 concurrency:

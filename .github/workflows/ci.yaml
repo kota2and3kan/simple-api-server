@@ -4,7 +4,21 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.dockerignore'
+      - 'Dockerfile'
+      - 'k8s/**'
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.dockerignore'
+      - 'Dockerfile'
+      - 'k8s/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
