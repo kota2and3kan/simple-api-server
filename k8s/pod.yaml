@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: simple-api-server
+  labels:
+    app.kubernetes.io/name: simple-api-server
+spec:
+  containers:
+    - name: simple-api-server
+      image: ghcr.io/kota2and3kan/simple-api-server:latest
+      ports:
+        - name: http
+          containerPort: 8080
+      env:
+        - name: SIMPLE_API_SERVER_PATH_LIST
+          value: payment,inventory,shipping,healthz
+        - name: SIMPLE_API_SERVER_LOG_EXCLUDE_PATH_LIST
+          value: healthz
+      readinessProbe:
+        httpGet:
+          path: /v1/healthz
+          port: http
+      livenessProbe:
+        httpGet:
+          path: /v1/healthz
+          port: http
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 64Mi
+      securityContext:
+        runAsNonRoot: true
+        # 65532 is the uid of the "nonroot" user defined in
+        # gcr.io/distroless/static-debian12:nonroot. The image sets USER by
+        # name, which kubelet cannot resolve, so runAsNonRoot needs it here.
+        runAsUser: 65532
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+        seccompProfile:
+          type: RuntimeDefault
+
