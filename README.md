@@ -25,16 +25,6 @@ The listen address keeps its own default of port `8080`, so a TLS run usually se
 
 A TLS listener also offers HTTP/2 over ALPN, so a client that supports it is served over HTTP/2 and the access log records `HTTP/2.0`. The plain HTTP listener stays on HTTP/1.1.
 
-A self signed certificate is enough for testing. The examples below keep the key pair in `tls/`, which `.gitignore` excludes:
-
-```sh
-mkdir -p tls
-openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
-  -keyout tls/tls.key -out tls/tls.crt \
-  -subj '/CN=localhost' \
-  -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1'
-```
-
 ## Usage
 
 ### Local Run
@@ -51,7 +41,17 @@ SIMPLE_API_SERVER_PATH_LIST='api,admin/users' go run .
 # /v1/api and /v1/admin/users
 ```
 
-Over TLS, with the key pair from the section above:
+Over TLS, with a self signed certificate. `.gitignore` excludes the `tls/` directory that the examples keep the key pair in:
+
+```sh
+mkdir -p tls
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -keyout tls/tls.key -out tls/tls.crt \
+  -subj '/CN=localhost' \
+  -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1'
+```
+
+Then point the server at it:
 
 ```sh
 SIMPLE_API_SERVER_LISTEN_ADDR=localhost:8443 \
@@ -69,7 +69,17 @@ docker run --rm -p 8080:8080 simple-api-server
 curl http://localhost:8080/v1/api
 ```
 
-Over TLS, with the key pair from the section above mounted at `/tls`. The container runs as uid `65532`, so both files need to stay readable for others:
+Over TLS, with a self signed certificate mounted at `/tls`:
+
+```sh
+mkdir -p tls
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -keyout tls/tls.key -out tls/tls.crt \
+  -subj '/CN=localhost' \
+  -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1'
+```
+
+The container runs as uid `65532`, so both files need to stay readable for others:
 
 ```sh
 chmod 0444 tls/tls.crt tls/tls.key
@@ -92,7 +102,7 @@ curl http://localhost:8080/v1/payment
 
 The manifests in `k8s/` serve `payment`, `inventory`, `shipping` and `healthz`, and pull the image from `ghcr.io`.
 
-`k8s/tls/` holds the same endpoints over HTTPS on port `8443`, under the separate name `simple-api-server-tls`. The Pod mounts a `kubernetes.io/tls` secret of that name, which is not part of the manifests:
+`k8s/tls/` holds the same endpoints over HTTPS on port `8443`, under the separate name `simple-api-server-tls`. The Pod mounts a `kubernetes.io/tls` secret of that name, which is not part of the manifests. Its certificate needs the service name among its subject alternative names:
 
 ```sh
 mkdir -p tls
@@ -100,8 +110,12 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
   -keyout tls/tls.key -out tls/tls.crt \
   -subj '/CN=simple-api-server-tls' \
   -addext 'subjectAltName=DNS:simple-api-server-tls,DNS:simple-api-server-tls.default.svc,DNS:localhost,IP:127.0.0.1'
-kubectl create secret tls simple-api-server-tls --cert=tls/tls.crt --key=tls/tls.key
+```
 
+Then create the secret and apply the manifests:
+
+```sh
+kubectl create secret tls simple-api-server-tls --cert=tls/tls.crt --key=tls/tls.key
 kubectl apply -f ./k8s/tls/
 kubectl port-forward svc/simple-api-server-tls 8443:8443
 curl --cacert tls/tls.crt https://localhost:8443/v1/payment
