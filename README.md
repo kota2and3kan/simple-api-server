@@ -2,20 +2,19 @@
 
 Simple API Server for some testing.
 
-Each configured endpoint returns `{"API":"<path>","Version":"<api version>"}` as JSON.
+Each configured endpoint returns `{"API":"<path>"}` as JSON.
 
 ## Configuration
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `SIMPLE_API_SERVER_LISTEN_ADDR` | `localhost:8080` | Address to listen on. The container image sets `0.0.0.0:8080`. A value without a port, such as `0.0.0.0` or `0.0.0.0:`, listens on port `8080`. |
-| `SIMPLE_API_SERVER_API_VERSION` | `v1` | First segment of every endpoint path. |
 | `SIMPLE_API_SERVER_PATH_LIST` | `api` | Endpoint paths, separated by commas. |
 | `SIMPLE_API_SERVER_LOG_EXCLUDE_PATH_LIST` | (empty) | Paths to keep out of the access log, separated by commas. |
 | `SIMPLE_API_SERVER_TLS_CERT_FILE` | (empty) | PEM certificate file. Serving TLS needs it together with the key file. |
 | `SIMPLE_API_SERVER_TLS_KEY_FILE` | (empty) | PEM private key file for the certificate above. |
 
-A single entry of either list may span several path segments, written with `/`, as in `admin/users`. The API version is read the same way. A segment must not be empty and must not contain whitespace, control characters, or any of `{`, `}`, `?`, `#`. An invalid value stops the server at startup with an `invalid configuration` message.
+A single entry of either list may span several path segments, written with `/`, as in `admin/users`. An endpoint that carries a version is written the same way, as in `v1/api`. A segment must not be empty and must not contain whitespace, control characters, or any of `{`, `}`, `?`, `#`. An invalid value stops the server at startup with an `invalid configuration` message.
 
 ### TLS
 
@@ -31,14 +30,21 @@ A TLS listener also offers HTTP/2 over ALPN, so a client that supports it is ser
 
 ```sh
 go run .
-curl http://localhost:8080/v1/api
+curl http://localhost:8080/api
 ```
 
 Several endpoints at once:
 
 ```sh
 SIMPLE_API_SERVER_PATH_LIST='api,admin/users' go run .
-# /v1/api and /v1/admin/users
+# /api and /admin/users
+```
+
+A version lives in the path itself:
+
+```sh
+SIMPLE_API_SERVER_PATH_LIST='v1/api,v2/api' go run .
+# /v1/api and /v2/api
 ```
 
 Over TLS, with a self signed certificate. `.gitignore` excludes the `tls/` directory that the examples keep the key pair in:
@@ -58,7 +64,7 @@ SIMPLE_API_SERVER_LISTEN_ADDR=localhost:8443 \
 SIMPLE_API_SERVER_TLS_CERT_FILE=tls/tls.crt \
 SIMPLE_API_SERVER_TLS_KEY_FILE=tls/tls.key \
   go run .
-curl --cacert tls/tls.crt https://localhost:8443/v1/api
+curl --cacert tls/tls.crt https://localhost:8443/api
 ```
 
 ### Docker
@@ -66,7 +72,7 @@ curl --cacert tls/tls.crt https://localhost:8443/v1/api
 ```sh
 docker build -t simple-api-server .
 docker run --rm -p 8080:8080 simple-api-server
-curl http://localhost:8080/v1/api
+curl http://localhost:8080/api
 ```
 
 Over TLS, with a self signed certificate mounted at `/tls`:
@@ -89,7 +95,7 @@ docker run --rm -p 8443:8443 \
   -e SIMPLE_API_SERVER_TLS_CERT_FILE=/tls/tls.crt \
   -e SIMPLE_API_SERVER_TLS_KEY_FILE=/tls/tls.key \
   simple-api-server
-curl --cacert tls/tls.crt https://localhost:8443/v1/api
+curl --cacert tls/tls.crt https://localhost:8443/api
 ```
 
 ### Kubernetes
@@ -97,7 +103,7 @@ curl --cacert tls/tls.crt https://localhost:8443/v1/api
 ```sh
 kubectl apply -f ./k8s/
 kubectl port-forward svc/simple-api-server 8080:8080
-curl http://localhost:8080/v1/payment
+curl http://localhost:8080/payment
 ```
 
 The manifests in `k8s/` serve `payment`, `inventory`, `shipping` and `healthz`, and pull the image from `ghcr.io`.
@@ -118,5 +124,5 @@ Then create the secret and apply the manifests:
 kubectl create secret tls simple-api-server-tls --cert=tls/tls.crt --key=tls/tls.key
 kubectl apply -f ./k8s/tls/
 kubectl port-forward svc/simple-api-server-tls 8443:8443
-curl --cacert tls/tls.crt https://localhost:8443/v1/payment
+curl --cacert tls/tls.crt https://localhost:8443/payment
 ```

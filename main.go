@@ -36,7 +36,6 @@ import (
 const (
 	defaultListenAddr  = "localhost:8080"
 	defaultPort        = "8080"
-	defaultAPIVersion  = "v1"
 	defaultPath        = "api"
 	pathListSeparator  = ","
 	forbiddenPathChars = "{}?#"
@@ -45,7 +44,6 @@ const (
 type config struct {
 	ListenAddr      string
 	Paths           []string
-	APIVersion      string
 	LogExcludePaths []string
 	TLSCertFile     string
 	TLSKeyFile      string
@@ -108,11 +106,6 @@ func loadConfig() (config, error) {
 		return config{}, fmt.Errorf("SIMPLE_API_SERVER_LISTEN_ADDR: %w", err)
 	}
 
-	version, err := normalizePath(getEnv("SIMPLE_API_SERVER_API_VERSION", defaultAPIVersion))
-	if err != nil {
-		return config{}, fmt.Errorf("SIMPLE_API_SERVER_API_VERSION: %w", err)
-	}
-
 	paths, err := parsePathList("SIMPLE_API_SERVER_PATH_LIST", getEnv("SIMPLE_API_SERVER_PATH_LIST", defaultPath))
 	if err != nil {
 		return config{}, err
@@ -138,7 +131,6 @@ func loadConfig() (config, error) {
 	return config{
 		ListenAddr:      listenAddr,
 		Paths:           paths,
-		APIVersion:      version,
 		LogExcludePaths: logExcludePaths,
 		TLSCertFile:     certFile,
 		TLSKeyFile:      keyFile,
@@ -180,12 +172,11 @@ func parsePathList(key, raw string) ([]string, error) {
 }
 
 type apiResponse struct {
-	API     string `json:"API"`
-	Version string `json:"Version"`
+	API string `json:"API"`
 }
 
-func apiHandler(logger *log.Logger, version, name string) http.HandlerFunc {
-	body, _ := json.Marshal(apiResponse{API: name, Version: version})
+func apiHandler(logger *log.Logger, name string) http.HandlerFunc {
+	body, _ := json.Marshal(apiResponse{API: name})
 	body = append(body, '\n')
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -219,7 +210,7 @@ func (r *statusRecorder) Unwrap() http.ResponseWriter {
 func accessLog(logger *log.Logger, cfg config, next http.Handler) http.Handler {
 	excluded := map[string]bool{}
 	for _, p := range cfg.LogExcludePaths {
-		excluded[routePath(cfg.APIVersion, p)] = true
+		excluded[routePath(p)] = true
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -234,15 +225,15 @@ func accessLog(logger *log.Logger, cfg config, next http.Handler) http.Handler {
 	})
 }
 
-func routePath(version, path string) string {
-	return "/" + version + "/" + path
+func routePath(path string) string {
+	return "/" + path
 }
 
 func newMux(logger *log.Logger, cfg config) *http.ServeMux {
 	mux := http.NewServeMux()
 	for _, p := range cfg.Paths {
-		route := routePath(cfg.APIVersion, p)
-		mux.HandleFunc(route, apiHandler(logger, cfg.APIVersion, p))
+		route := routePath(p)
+		mux.HandleFunc(route, apiHandler(logger, p))
 		logger.Printf("registered endpoint: %s", route)
 	}
 	return mux
