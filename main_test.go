@@ -112,6 +112,7 @@ var envKeys = []string{
 	"SIMPLE_API_SERVER_LISTEN_ADDR",
 	"SIMPLE_API_SERVER_PATH_LIST",
 	"SIMPLE_API_SERVER_LOG_EXCLUDE_PATH_LIST",
+	"SIMPLE_API_SERVER_API_CONFIG_FILE",
 	"SIMPLE_API_SERVER_TLS_CERT_FILE",
 	"SIMPLE_API_SERVER_TLS_KEY_FILE",
 }
@@ -447,6 +448,260 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
+func writeAPIConfigFile(t *testing.T, content string) string {
+	t.Helper()
+
+	file := filepath.Join(t.TempDir(), "api.yaml")
+	if err := os.WriteFile(file, []byte(content), 0o600); err != nil {
+		t.Fatalf("writing the api config file: %v", err)
+	}
+	return file
+}
+
+func TestLoadConfigFromAPIConfigFile(t *testing.T) {
+	tests := []struct {
+		name            string
+		content         string
+		want            []endpoint
+		wantErrContains string
+	}{
+		{
+			name: "a response body is read from flow style and from a block scalar alike",
+			content: `
+apis:
+  - path: v1/foo
+    statusCode: 200
+    respBody: {"k1": "v1", "k2": {"k3": "v3"}}
+  - path: v1/bar
+    statusCode: 404
+    respBody: |
+      {
+        "k1": "v1",
+        "k2": {
+          "k3": "v3"
+        }
+      }
+  - path: v1/baz
+    statusCode: 200
+    respBody: {"k4": "v4"}
+`,
+			want: []endpoint{
+				{Path: "v1/foo", Status: 200, Body: `{"k1":"v1","k2":{"k3":"v3"}}`},
+				{Path: "v1/bar", Status: 404, Body: `{"k1":"v1","k2":{"k3":"v3"}}`},
+				{Path: "v1/baz", Status: 200, Body: `{"k4":"v4"}`},
+			},
+		},
+		{
+			name: "a response body written as yaml keeps its key order",
+			content: `
+apis:
+  - path: api
+    respBody:
+      zzz: first
+      aaa: second
+      nums: [1, 2.5, true, null]
+`,
+			want: []endpoint{
+				{Path: "api", Status: 200, Body: `{"zzz":"first","aaa":"second","nums":[1,2.5,true,null]}`},
+			},
+		},
+		{
+			name: "a missing status code answers with 200 and a missing body keeps the default one",
+			content: `
+apis:
+  - path: api
+  - path: health
+    statusCode: 503
+    respBody:
+`,
+			want: []endpoint{
+				{Path: "api", Status: 200},
+				{Path: "health", Status: 503},
+			},
+		},
+		{
+			name: "a path is normalized like a path list entry",
+			content: `
+apis:
+  - path: " /v1/api/ "
+    respBody: [1, "two"]
+`,
+			want: []endpoint{{Path: "v1/api", Status: 200, Body: `[1,"two"]`}},
+		},
+		{
+			name: "a body of 204 may be left out",
+			content: `
+apis:
+  - path: api
+    statusCode: 204
+`,
+			want: []endpoint{{Path: "api", Status: 204}},
+		},
+
+		{
+			name:            "a file holding no api is rejected",
+			content:         "apis:\n",
+			wantErrContains: "no path given",
+		},
+		{
+			name:            "an empty file is rejected",
+			content:         "",
+			wantErrContains: "holds no YAML document",
+		},
+		{
+			name:            "a second document is rejected",
+			content:         "apis:\n  - path: api\n---\napis:\n  - path: other\n",
+			wantErrContains: "must hold a single YAML document",
+		},
+		{
+			name:            "an unknown field is rejected",
+			content:         "apis:\n  - path: api\n    body: {}\n",
+			wantErrContains: "field body not found",
+		},
+		{
+			name:            "a repeated path is rejected",
+			content:         "apis:\n  - path: api\n  - path: /api/\n",
+			wantErrContains: `path "api" is listed more than once`,
+		},
+		{
+			name:            "an invalid path is rejected",
+			content:         "apis:\n  - path: \"{id}\"\n",
+			wantErrContains: "must not contain",
+		},
+		{
+			name:            "a missing path is rejected",
+			content:         "apis:\n  - statusCode: 200\n",
+			wantErrContains: "path is empty",
+		},
+		{
+			name:            "a status code outside the valid range is rejected",
+			content:         "apis:\n  - path: api\n    statusCode: 600\n",
+			wantErrContains: `path "api": status code 600 must be an integer between 200 and 599`,
+		},
+		{
+			name:            "a non numeric status code is rejected",
+			content:         "apis:\n  - path: api\n    statusCode: abc\n",
+			wantErrContains: "cannot unmarshal",
+		},
+		{
+			name:            "a body on a status code that carries none is rejected",
+			content:         "apis:\n  - path: api\n    statusCode: 204\n    respBody: {\"k1\": \"v1\"}\n",
+			wantErrContains: `path "api": respBody is set while status code 204 carries no body`,
+		},
+		{
+			name:            "a block scalar that is not valid json is rejected",
+			content:         "apis:\n  - path: api\n    respBody: |\n      {\n        \"k1\", \"v1\"\n      }\n",
+			wantErrContains: "respBody is not valid JSON",
+		},
+		{
+			name:            "a plain scalar that is not valid json is rejected",
+			content:         "apis:\n  - path: api\n    respBody: hello\n",
+			wantErrContains: "respBody is not valid JSON",
+		},
+		{
+			name:            "a duplicate object key is rejected",
+			content:         "apis:\n  - path: api\n    respBody:\n      k1: v1\n      k1: v2\n",
+			wantErrContains: `duplicate object key "k1"`,
+		},
+		{
+			name:            "invalid yaml is rejected",
+			content:         "apis: [\n",
+			wantErrContains: "yaml:",
+		},
+		{
+			name:            "a self referencing alias is rejected rather than followed forever",
+			content:         "apis:\n  - path: api\n    respBody: &a {k1: *a}\n",
+			wantErrContains: "respBody is nested deeper than 100 levels",
+		},
+		{
+			name:            "a merge key is rejected rather than served as a literal key",
+			content:         "apis:\n  - path: v1/foo\n    respBody: &base {a: 1}\n  - path: v1/bar\n    respBody:\n      <<: *base\n      b: 2\n",
+			wantErrContains: `respBody does not support the YAML merge key "<<"`,
+		},
+		{
+			name: "a body that expands beyond the size limit is rejected",
+			content: `
+apis:
+  - path: a1
+    respBody: &a [x, x, x, x, x, x, x, x, x, x]
+  - path: a2
+    respBody: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]
+  - path: a3
+    respBody: &c [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]
+  - path: a4
+    respBody: &d [*c, *c, *c, *c, *c, *c, *c, *c, *c, *c]
+  - path: a5
+    respBody: &e [*d, *d, *d, *d, *d, *d, *d, *d, *d, *d]
+  - path: a6
+    respBody: &f [*e, *e, *e, *e, *e, *e, *e, *e, *e, *e]
+  - path: a7
+    respBody: [*f, *f, *f, *f, *f, *f, *f, *f, *f, *f]
+`,
+			wantErrContains: "respBody expands beyond 10485760 bytes",
+		},
+	}
+
+	for _, tt := range tests {
+		// No t.Parallel here: t.Setenv forbids it.
+		t.Run(tt.name, func(t *testing.T) {
+			for _, key := range envKeys {
+				t.Setenv(key, "")
+			}
+			t.Setenv("SIMPLE_API_SERVER_API_CONFIG_FILE", writeAPIConfigFile(t, tt.content))
+
+			got, err := loadConfig()
+			if tt.wantErrContains != "" {
+				if err == nil {
+					t.Fatalf("loadConfig() = %+v, nil; want an error", got)
+				}
+				if !strings.Contains(err.Error(), tt.wantErrContains) {
+					t.Errorf("loadConfig() error = %q; want it to contain %q", err, tt.wantErrContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("loadConfig() returned an unexpected error: %v", err)
+			}
+			if !slices.Equal(got.Endpoints, tt.want) {
+				t.Errorf("loadConfig().Endpoints = %+v; want %+v", got.Endpoints, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadConfigRejectsAPIConfigFileTogetherWithPathList(t *testing.T) {
+	for _, key := range envKeys {
+		t.Setenv(key, "")
+	}
+	t.Setenv("SIMPLE_API_SERVER_API_CONFIG_FILE", writeAPIConfigFile(t, "apis:\n  - path: api\n"))
+	t.Setenv("SIMPLE_API_SERVER_PATH_LIST", "other")
+
+	got, err := loadConfig()
+	if err == nil {
+		t.Fatalf("loadConfig() = %+v, nil; want an error", got)
+	}
+	for _, want := range []string{"SIMPLE_API_SERVER_PATH_LIST", "SIMPLE_API_SERVER_API_CONFIG_FILE"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("loadConfig() error = %q; want it to name %s", err, want)
+		}
+	}
+}
+
+func TestLoadConfigRejectsAnUnreadableAPIConfigFile(t *testing.T) {
+	for _, key := range envKeys {
+		t.Setenv(key, "")
+	}
+	t.Setenv("SIMPLE_API_SERVER_API_CONFIG_FILE", filepath.Join(t.TempDir(), "missing.yaml"))
+
+	got, err := loadConfig()
+	if err == nil {
+		t.Fatalf("loadConfig() = %+v, nil; want an error", got)
+	}
+	if !strings.Contains(err.Error(), "SIMPLE_API_SERVER_API_CONFIG_FILE") {
+		t.Errorf("loadConfig() error = %q; want it to name SIMPLE_API_SERVER_API_CONFIG_FILE", err)
+	}
+}
+
 func TestNewMux(t *testing.T) {
 	t.Parallel()
 
@@ -598,6 +853,40 @@ func TestNewMuxServesTheConfiguredStatusCode(t *testing.T) {
 		want := apiResponse{API: ep.Path, Status: ep.Status}
 		if got != want {
 			t.Errorf("GET %s: body = %+v; want %+v", target, got, want)
+		}
+	}
+}
+
+func TestNewMuxServesTheConfiguredRespBody(t *testing.T) {
+	t.Parallel()
+
+	cfg := config{
+		Endpoints: []endpoint{
+			{Path: "v1/foo", Status: http.StatusOK, Body: `{"k1":"v1","k2":{"k3":"v3"}}`},
+			{Path: "v1/bar", Status: http.StatusNotFound, Body: `[1,"two",null]`},
+			{Path: "v1/baz", Status: http.StatusOK},
+		},
+	}
+	mux := newMux(log.New(io.Discard, "", 0), cfg)
+
+	tests := []struct {
+		target   string
+		wantBody string
+	}{
+		{target: "/v1/foo", wantBody: "{\"k1\":\"v1\",\"k2\":{\"k3\":\"v3\"}}\n"},
+		{target: "/v1/bar", wantBody: "[1,\"two\",null]\n"},
+		{target: "/v1/baz", wantBody: "{\"API\":\"v1/baz\",\"status\":200}\n"},
+	}
+
+	for _, tt := range tests {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tt.target, nil))
+
+		if got := rec.Body.String(); got != tt.wantBody {
+			t.Errorf("GET %s: body = %q; want %q", tt.target, got, tt.wantBody)
+		}
+		if got := rec.Header().Get("Content-Type"); got != "application/json" {
+			t.Errorf("GET %s: Content-Type = %q; want %q", tt.target, got, "application/json")
 		}
 	}
 }
