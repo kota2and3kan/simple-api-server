@@ -28,12 +28,12 @@ spec:
           readOnly: true
       readinessProbe:
         httpGet:
-          path: /v1/healthz
+          path: /healthz
           port: https
           scheme: HTTPS
       livenessProbe:
         httpGet:
-          path: /v1/healthz
+          path: /healthz
           port: https
           scheme: HTTPS
       resources:

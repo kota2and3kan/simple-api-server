@@ -101,7 +101,6 @@ func TestNormalizePath(t *testing.T) {
 
 var envKeys = []string{
 	"SIMPLE_API_SERVER_LISTEN_ADDR",
-	"SIMPLE_API_SERVER_API_VERSION",
 	"SIMPLE_API_SERVER_PATH_LIST",
 	"SIMPLE_API_SERVER_LOG_EXCLUDE_PATH_LIST",
 	"SIMPLE_API_SERVER_TLS_CERT_FILE",
@@ -118,97 +117,85 @@ func TestLoadConfig(t *testing.T) {
 		{
 			name: "nothing set falls back to the defaults",
 			env:  nil,
-			want: config{ListenAddr: "localhost:8080", APIVersion: "v1", Paths: []string{"api"}},
+			want: config{ListenAddr: "localhost:8080", Paths: []string{"api"}},
 		},
 		{
 			name: "blank values fall back to the defaults",
 			env: map[string]string{
 				"SIMPLE_API_SERVER_LISTEN_ADDR": "   ",
-				"SIMPLE_API_SERVER_API_VERSION": "   ",
 				"SIMPLE_API_SERVER_PATH_LIST":   "   ",
 			},
-			want: config{ListenAddr: "localhost:8080", APIVersion: "v1", Paths: []string{"api"}},
+			want: config{ListenAddr: "localhost:8080", Paths: []string{"api"}},
 		},
 		{
 			name: "every value overridden",
 			env: map[string]string{
 				"SIMPLE_API_SERVER_LISTEN_ADDR": "0.0.0.0:9090",
-				"SIMPLE_API_SERVER_API_VERSION": "v2",
 				"SIMPLE_API_SERVER_PATH_LIST":   "users",
 			},
-			want: config{ListenAddr: "0.0.0.0:9090", APIVersion: "v2", Paths: []string{"users"}},
+			want: config{ListenAddr: "0.0.0.0:9090", Paths: []string{"users"}},
 		},
 		{
 			name: "surrounding spaces are trimmed",
 			env:  map[string]string{"SIMPLE_API_SERVER_LISTEN_ADDR": "  0.0.0.0:9090  "},
-			want: config{ListenAddr: "0.0.0.0:9090", APIVersion: "v1", Paths: []string{"api"}},
+			want: config{ListenAddr: "0.0.0.0:9090", Paths: []string{"api"}},
 		},
 		{
 			name: "an empty host listens on every interface",
 			env:  map[string]string{"SIMPLE_API_SERVER_LISTEN_ADDR": ":9090"},
-			want: config{ListenAddr: ":9090", APIVersion: "v1", Paths: []string{"api"}},
+			want: config{ListenAddr: ":9090", Paths: []string{"api"}},
 		},
 		{
 			name: "a listen address without a port falls back to the default port",
 			env:  map[string]string{"SIMPLE_API_SERVER_LISTEN_ADDR": "0.0.0.0"},
-			want: config{ListenAddr: "0.0.0.0:8080", APIVersion: "v1", Paths: []string{"api"}},
+			want: config{ListenAddr: "0.0.0.0:8080", Paths: []string{"api"}},
 		},
 		{
 			name: "a listen address with an empty port falls back to the default port",
 			env:  map[string]string{"SIMPLE_API_SERVER_LISTEN_ADDR": "0.0.0.0:"},
-			want: config{ListenAddr: "0.0.0.0:8080", APIVersion: "v1", Paths: []string{"api"}},
+			want: config{ListenAddr: "0.0.0.0:8080", Paths: []string{"api"}},
 		},
 		{
 			name: "a lone colon listens on every interface on the default port",
 			env:  map[string]string{"SIMPLE_API_SERVER_LISTEN_ADDR": ":"},
-			want: config{ListenAddr: ":8080", APIVersion: "v1", Paths: []string{"api"}},
+			want: config{ListenAddr: ":8080", Paths: []string{"api"}},
 		},
 		{
 			name: "an ipv6 listen address keeps its brackets",
 			env:  map[string]string{"SIMPLE_API_SERVER_LISTEN_ADDR": "[::1]:"},
-			want: config{ListenAddr: "[::1]:8080", APIVersion: "v1", Paths: []string{"api"}},
-		},
-		{
-			name: "api version keeps only the inner part",
-			env:  map[string]string{"SIMPLE_API_SERVER_API_VERSION": "/v2/"},
-			want: config{ListenAddr: "localhost:8080", APIVersion: "v2", Paths: []string{"api"}},
+			want: config{ListenAddr: "[::1]:8080", Paths: []string{"api"}},
 		},
 		{
 			name: "path list is split on commas in order",
 			env:  map[string]string{"SIMPLE_API_SERVER_PATH_LIST": "users,health,ready"},
-			want: config{ListenAddr: "localhost:8080", APIVersion: "v1", Paths: []string{"users", "health", "ready"}},
+			want: config{ListenAddr: "localhost:8080", Paths: []string{"users", "health", "ready"}},
 		},
 		{
 			name: "path list entries are trimmed",
 			env:  map[string]string{"SIMPLE_API_SERVER_PATH_LIST": " api , health "},
-			want: config{ListenAddr: "localhost:8080", APIVersion: "v1", Paths: []string{"api", "health"}},
+			want: config{ListenAddr: "localhost:8080", Paths: []string{"api", "health"}},
 		},
 		{
 			name: "duplicate paths are registered once",
 			env:  map[string]string{"SIMPLE_API_SERVER_PATH_LIST": "api,health,api"},
-			want: config{ListenAddr: "localhost:8080", APIVersion: "v1", Paths: []string{"api", "health"}},
+			want: config{ListenAddr: "localhost:8080", Paths: []string{"api", "health"}},
 		},
 		{
 			name: "empty path list entries are skipped",
 			env:  map[string]string{"SIMPLE_API_SERVER_PATH_LIST": "a,,b"},
-			want: config{ListenAddr: "localhost:8080", APIVersion: "v1", Paths: []string{"a", "b"}},
+			want: config{ListenAddr: "localhost:8080", Paths: []string{"a", "b"}},
 		},
 		{
 			name: "a path list entry may span several segments",
 			env:  map[string]string{"SIMPLE_API_SERVER_PATH_LIST": "api,admin/users"},
-			want: config{ListenAddr: "localhost:8080", APIVersion: "v1", Paths: []string{"api", "admin/users"}},
+			want: config{ListenAddr: "localhost:8080", Paths: []string{"api", "admin/users"}},
+		},
+		{
+			name: "a path list entry may carry a version segment",
+			env:  map[string]string{"SIMPLE_API_SERVER_PATH_LIST": "v1/api,v2/api"},
+			want: config{ListenAddr: "localhost:8080", Paths: []string{"v1/api", "v2/api"}},
 		},
 
-		{
-			name:            "api version of only a slash is rejected",
-			env:             map[string]string{"SIMPLE_API_SERVER_API_VERSION": "/"},
-			wantErrContains: "SIMPLE_API_SERVER_API_VERSION",
-		},
-		{
-			name:            "api version with a wildcard is rejected",
-			env:             map[string]string{"SIMPLE_API_SERVER_API_VERSION": "{id}"},
-			wantErrContains: "SIMPLE_API_SERVER_API_VERSION",
-		},
 		{
 			name:            "path with an unbalanced brace is rejected",
 			env:             map[string]string{"SIMPLE_API_SERVER_PATH_LIST": "{id"},
@@ -232,7 +219,6 @@ func TestLoadConfig(t *testing.T) {
 			},
 			want: config{
 				ListenAddr:      "localhost:8080",
-				APIVersion:      "v1",
 				Paths:           []string{"api", "healthz"},
 				LogExcludePaths: []string{"healthz"},
 			},
@@ -242,7 +228,6 @@ func TestLoadConfig(t *testing.T) {
 			env:  map[string]string{"SIMPLE_API_SERVER_LOG_EXCLUDE_PATH_LIST": "admin/users"},
 			want: config{
 				ListenAddr:      "localhost:8080",
-				APIVersion:      "v1",
 				Paths:           []string{"api"},
 				LogExcludePaths: []string{"admin/users"},
 			},
@@ -273,11 +258,6 @@ func TestLoadConfig(t *testing.T) {
 			wantErrContains: "SIMPLE_API_SERVER_PATH_LIST",
 		},
 		{
-			name:            "an api version with an inner space is rejected",
-			env:             map[string]string{"SIMPLE_API_SERVER_API_VERSION": "v 1"},
-			wantErrContains: "SIMPLE_API_SERVER_API_VERSION",
-		},
-		{
 			name:            "a log exclude path with an inner space is rejected",
 			env:             map[string]string{"SIMPLE_API_SERVER_LOG_EXCLUDE_PATH_LIST": "my api"},
 			wantErrContains: "SIMPLE_API_SERVER_LOG_EXCLUDE_PATH_LIST",
@@ -296,7 +276,6 @@ func TestLoadConfig(t *testing.T) {
 			},
 			want: config{
 				ListenAddr:  "localhost:8080",
-				APIVersion:  "v1",
 				Paths:       []string{"api"},
 				TLSCertFile: "/tls/tls.crt",
 				TLSKeyFile:  "/tls/tls.key",
@@ -334,7 +313,7 @@ func TestLoadConfig(t *testing.T) {
 			if err != nil {
 				t.Fatalf("loadConfig() returned an unexpected error: %v", err)
 			}
-			if got.ListenAddr != tt.want.ListenAddr || got.APIVersion != tt.want.APIVersion ||
+			if got.ListenAddr != tt.want.ListenAddr ||
 				got.TLSCertFile != tt.want.TLSCertFile || got.TLSKeyFile != tt.want.TLSKeyFile {
 				t.Errorf("loadConfig() = %+v; want %+v", got, tt.want)
 			}
@@ -353,8 +332,7 @@ func TestNewMux(t *testing.T) {
 
 	cfg := config{
 		ListenAddr: "localhost:8080",
-		APIVersion: "v1",
-		Paths:      []string{"api", "admin/users"},
+		Paths:      []string{"api", "admin/users", "v1/api"},
 	}
 	mux := newMux(log.New(io.Discard, "", 0), cfg)
 
@@ -369,53 +347,54 @@ func TestNewMux(t *testing.T) {
 		{
 			name:            "registered path",
 			method:          http.MethodGet,
-			target:          "/v1/api",
+			target:          "/api",
 			wantStatus:      http.StatusOK,
-			wantBody:        "{\"API\":\"api\",\"Version\":\"v1\"}\n",
+			wantBody:        "{\"API\":\"api\"}\n",
 			wantContentType: "application/json",
 		},
 		{
 			name:            "registered multi segment path",
 			method:          http.MethodGet,
-			target:          "/v1/admin/users",
+			target:          "/admin/users",
 			wantStatus:      http.StatusOK,
-			wantBody:        "{\"API\":\"admin/users\",\"Version\":\"v1\"}\n",
+			wantBody:        "{\"API\":\"admin/users\"}\n",
 			wantContentType: "application/json",
 		},
 		{
-			name:            "the api version is not a wildcard",
+			name:            "a version segment is served as part of the path",
+			method:          http.MethodGet,
+			target:          "/v1/api",
+			wantStatus:      http.StatusOK,
+			wantBody:        "{\"API\":\"v1/api\"}\n",
+			wantContentType: "application/json",
+		},
+		{
+			name:            "a leading segment is not a wildcard",
 			method:          http.MethodGet,
 			target:          "/anything/api",
 			wantStatus:      http.StatusNotFound,
 			wantContentType: "",
 		},
 		{
-			name:            "the api version is required",
-			method:          http.MethodGet,
-			target:          "/api",
-			wantStatus:      http.StatusNotFound,
-			wantContentType: "",
-		},
-		{
 			name:            "an unregistered path is not served",
 			method:          http.MethodGet,
-			target:          "/v1/health",
+			target:          "/health",
 			wantStatus:      http.StatusNotFound,
 			wantContentType: "",
 		},
 		{
 			name:            "a path is not a prefix match",
 			method:          http.MethodGet,
-			target:          "/v1/api/extra",
+			target:          "/api/extra",
 			wantStatus:      http.StatusNotFound,
 			wantContentType: "",
 		},
 		{
 			name:            "no method is required",
 			method:          http.MethodPost,
-			target:          "/v1/api",
+			target:          "/api",
 			wantStatus:      http.StatusOK,
-			wantBody:        "{\"API\":\"api\",\"Version\":\"v1\"}\n",
+			wantBody:        "{\"API\":\"api\"}\n",
 			wantContentType: "application/json",
 		},
 	}
@@ -440,10 +419,10 @@ func TestNewMux(t *testing.T) {
 	}
 }
 
-func TestNewMuxResponseCarriesConfiguredVersion(t *testing.T) {
+func TestNewMuxResponseCarriesConfiguredPath(t *testing.T) {
 	t.Parallel()
 
-	cfg := config{APIVersion: "v2", Paths: []string{"api"}}
+	cfg := config{Paths: []string{"v2/api"}}
 	mux := newMux(log.New(io.Discard, "", 0), cfg)
 
 	rec := httptest.NewRecorder()
@@ -457,7 +436,7 @@ func TestNewMuxResponseCarriesConfiguredVersion(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("GET /v2/api: body %q is not valid JSON: %v", rec.Body.String(), err)
 	}
-	want := apiResponse{API: "api", Version: "v2"}
+	want := apiResponse{API: "v2/api"}
 	if got != want {
 		t.Errorf("GET /v2/api: body = %+v; want %+v", got, want)
 	}
@@ -467,9 +446,8 @@ func TestAccessLogExcludesConfiguredPaths(t *testing.T) {
 	t.Parallel()
 
 	cfg := config{
-		APIVersion:      "v1",
-		Paths:           []string{"payment", "healthz"},
-		LogExcludePaths: []string{"healthz"},
+		Paths:           []string{"v1/payment", "v1/healthz"},
+		LogExcludePaths: []string{"v1/healthz"},
 	}
 	var logged bytes.Buffer
 	handler := accessLog(log.New(&logged, "", 0), cfg, newMux(log.New(io.Discard, "", 0), cfg))
@@ -607,8 +585,7 @@ func TestServerServesHTTPSWithTheConfiguredKeyPair(t *testing.T) {
 
 	certFile, keyFile, roots := writeTestKeyPair(t)
 	cfg := config{
-		APIVersion:  "v1",
-		Paths:       []string{"api"},
+		Paths:       []string{"v1/api"},
 		TLSCertFile: certFile,
 		TLSKeyFile:  keyFile,
 	}
@@ -655,7 +632,7 @@ func TestServerServesHTTPSWithTheConfiguredKeyPair(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the body: %v", err)
 	}
-	if want := "{\"API\":\"api\",\"Version\":\"v1\"}\n"; string(body) != want {
+	if want := "{\"API\":\"v1/api\"}\n"; string(body) != want {
 		t.Errorf("GET https://%s/v1/api: body = %q; want %q", addr, body, want)
 	}
 
