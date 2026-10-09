@@ -38,12 +38,21 @@ const (
 	defaultPort        = "8080"
 	defaultPath        = "api"
 	pathListSeparator  = ","
-	forbiddenPathChars = "{}?#"
+	statusSeparator    = ":"
+	forbiddenPathChars = "{}?#" + statusSeparator
+	defaultStatus      = http.StatusOK
+	minStatus          = 200
+	maxStatus          = 599
 )
+
+type endpoint struct {
+	Path   string
+	Status int
+}
 
 type config struct {
 	ListenAddr      string
-	Paths           []string
+	Endpoints       []endpoint
 	LogExcludePaths []string
 	TLSCertFile     string
 	TLSKeyFile      string
@@ -106,11 +115,11 @@ func loadConfig() (config, error) {
 		return config{}, fmt.Errorf("SIMPLE_API_SERVER_LISTEN_ADDR: %w", err)
 	}
 
-	paths, err := parsePathList("SIMPLE_API_SERVER_PATH_LIST", getEnv("SIMPLE_API_SERVER_PATH_LIST", defaultPath))
+	endpoints, err := parseEndpointList("SIMPLE_API_SERVER_PATH_LIST", getEnv("SIMPLE_API_SERVER_PATH_LIST", defaultPath))
 	if err != nil {
 		return config{}, err
 	}
-	if len(paths) == 0 {
+	if len(endpoints) == 0 {
 		return config{}, errors.New("SIMPLE_API_SERVER_PATH_LIST: no path given")
 	}
 
@@ -130,7 +139,7 @@ func loadConfig() (config, error) {
 
 	return config{
 		ListenAddr:      listenAddr,
-		Paths:           paths,
+		Endpoints:       endpoints,
 		LogExcludePaths: logExcludePaths,
 		TLSCertFile:     certFile,
 		TLSKeyFile:      keyFile,
@@ -171,15 +180,75 @@ func parsePathList(key, raw string) ([]string, error) {
 	return paths, nil
 }
 
-type apiResponse struct {
-	API string `json:"API"`
+func parseEndpointList(key, raw string) ([]endpoint, error) {
+	seen := map[string]int{}
+	var endpoints []endpoint
+	for _, entry := range strings.Split(raw, pathListSeparator) {
+		if strings.TrimSpace(entry) == "" {
+			continue
+		}
+		ep, err := parseEndpoint(entry)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", key, err)
+		}
+		if status, ok := seen[ep.Path]; ok {
+			if status != ep.Status {
+				return nil, fmt.Errorf("%s: path %q is listed with both status code %d and %d",
+					key, ep.Path, status, ep.Status)
+			}
+			continue
+		}
+		seen[ep.Path] = ep.Status
+		endpoints = append(endpoints, ep)
+	}
+	return endpoints, nil
 }
 
-func apiHandler(logger *log.Logger, name string) http.HandlerFunc {
-	body, _ := json.Marshal(apiResponse{API: name})
+func parseEndpoint(raw string) (endpoint, error) {
+	rawPath, rawStatus, hasStatus := strings.Cut(raw, statusSeparator)
+	path, err := normalizePath(rawPath)
+	if err != nil {
+		return endpoint{}, err
+	}
+	status := defaultStatus
+	if hasStatus {
+		if status, err = parseStatus(rawStatus); err != nil {
+			return endpoint{}, fmt.Errorf("path %q: %w", path, err)
+		}
+	}
+	return endpoint{Path: path, Status: status}, nil
+}
+
+func parseStatus(raw string) (int, error) {
+	status, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || status < minStatus || status > maxStatus {
+		return 0, fmt.Errorf("status code %q must be an integer between %d and %d",
+			strings.TrimSpace(raw), minStatus, maxStatus)
+	}
+	return status, nil
+}
+
+type apiResponse struct {
+	API    string `json:"API"`
+	Status int    `json:"status"`
+}
+
+func bodyAllowedForStatus(status int) bool {
+	return status != http.StatusNoContent && status != http.StatusNotModified
+}
+
+func apiHandler(logger *log.Logger, ep endpoint) http.HandlerFunc {
+	body, _ := json.Marshal(apiResponse{API: ep.Path, Status: ep.Status})
 	body = append(body, '\n')
+	withBody := bodyAllowedForStatus(ep.Status)
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		if withBody {
+			w.Header().Set("Content-Type", "application/json")
+		}
+		w.WriteHeader(ep.Status)
+		if !withBody {
+			return
+		}
 		if _, err := w.Write(body); err != nil {
 			logger.Printf("write error: %s %s: %v", r.RemoteAddr, r.URL.Path, err)
 		}
@@ -231,10 +300,10 @@ func routePath(path string) string {
 
 func newMux(logger *log.Logger, cfg config) *http.ServeMux {
 	mux := http.NewServeMux()
-	for _, p := range cfg.Paths {
-		route := routePath(p)
-		mux.HandleFunc(route, apiHandler(logger, p))
-		logger.Printf("registered endpoint: %s", route)
+	for _, ep := range cfg.Endpoints {
+		route := routePath(ep.Path)
+		mux.HandleFunc(route, apiHandler(logger, ep))
+		logger.Printf("registered endpoint: %s -> %d", route, ep.Status)
 	}
 	return mux
 }

@@ -2,19 +2,34 @@
 
 Simple API Server for some testing.
 
-Each configured endpoint returns `{"API":"<path>"}` as JSON.
+Each configured endpoint returns `{"API":"<path>","status":<code>}` as JSON, with `<code>` as the HTTP status code of the response itself.
 
 ## Configuration
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `SIMPLE_API_SERVER_LISTEN_ADDR` | `localhost:8080` | Address to listen on. The container image sets `0.0.0.0:8080`. A value without a port, such as `0.0.0.0` or `0.0.0.0:`, listens on port `8080`. |
-| `SIMPLE_API_SERVER_PATH_LIST` | `api` | Endpoint paths, separated by commas. |
-| `SIMPLE_API_SERVER_LOG_EXCLUDE_PATH_LIST` | (empty) | Paths to keep out of the access log, separated by commas. |
+| `SIMPLE_API_SERVER_PATH_LIST` | `api` | Endpoints, separated by commas. Each one is a path, optionally followed by `:` and the status code it answers with. |
+| `SIMPLE_API_SERVER_LOG_EXCLUDE_PATH_LIST` | (empty) | Paths to keep out of the access log, separated by commas. Paths only, with no status code. |
 | `SIMPLE_API_SERVER_TLS_CERT_FILE` | (empty) | PEM certificate file. Serving TLS needs it together with the key file. |
 | `SIMPLE_API_SERVER_TLS_KEY_FILE` | (empty) | PEM private key file for the certificate above. |
 
-A single entry of either list may span several path segments, written with `/`, as in `admin/users`. An endpoint that carries a version is written the same way, as in `v1/api`. A segment must not be empty and must not contain whitespace, control characters, or any of `{`, `}`, `?`, `#`. An invalid value stops the server at startup with an `invalid configuration` message.
+A single entry of either list may span several path segments, written with `/`, as in `admin/users`. An endpoint that carries a version is written the same way, as in `v1/api`. A segment must not be empty and must not contain whitespace, control characters, or any of `{`, `}`, `?`, `#`, `:`. An invalid value stops the server at startup with an `invalid configuration` message.
+
+### Status codes
+
+An entry of `SIMPLE_API_SERVER_PATH_LIST` answers with the status code written after its `:`, as in `v1/bar:404`. An entry without one answers with `200`. The code must be an integer between `200` and `599`; anything else stops the server at startup.
+
+A path listed more than once is registered once. Where the repeated entries disagree on the status code, as in `healthz,healthz:503`, the server stops at startup rather than pick one of them.
+
+```sh
+SIMPLE_API_SERVER_PATH_LIST='v1/foo:200,v1/bar:404,v1/baz:503' go run .
+curl -i http://localhost:8080/v1/bar
+# HTTP/1.1 404 Not Found
+# {"API":"v1/bar","status":404}
+```
+
+A `204` or a `304` endpoint sends no body and no `Content-Type`, since those responses carry none.
 
 ### TLS
 
