@@ -16,11 +16,13 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -31,6 +33,8 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+
+	yaml "go.yaml.in/yaml/v3"
 )
 
 const (
@@ -43,11 +47,14 @@ const (
 	defaultStatus      = http.StatusOK
 	minStatus          = 200
 	maxStatus          = 599
+	maxRespBodyDepth   = 100
+	maxRespBodyBytes   = 10 << 20
 )
 
 type endpoint struct {
 	Path   string
 	Status int
+	Body   string
 }
 
 type config struct {
@@ -115,12 +122,9 @@ func loadConfig() (config, error) {
 		return config{}, fmt.Errorf("SIMPLE_API_SERVER_LISTEN_ADDR: %w", err)
 	}
 
-	endpoints, err := parseEndpointList("SIMPLE_API_SERVER_PATH_LIST", getEnv("SIMPLE_API_SERVER_PATH_LIST", defaultPath))
+	endpoints, err := loadEndpoints()
 	if err != nil {
 		return config{}, err
-	}
-	if len(endpoints) == 0 {
-		return config{}, errors.New("SIMPLE_API_SERVER_PATH_LIST: no path given")
 	}
 
 	logExcludePaths, err := parsePathList("SIMPLE_API_SERVER_LOG_EXCLUDE_PATH_LIST", getEnv("SIMPLE_API_SERVER_LOG_EXCLUDE_PATH_LIST", ""))
@@ -158,6 +162,38 @@ func newTLSConfig(cfg config) (*tls.Config, error) {
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
 	}, nil
+}
+
+func loadEndpoints() ([]endpoint, error) {
+	configFile := getEnv("SIMPLE_API_SERVER_API_CONFIG_FILE", "")
+	pathList := getEnv("SIMPLE_API_SERVER_PATH_LIST", "")
+
+	if configFile != "" {
+		if pathList != "" {
+			return nil, errors.New(
+				"SIMPLE_API_SERVER_PATH_LIST: must not be set together with SIMPLE_API_SERVER_API_CONFIG_FILE")
+		}
+		endpoints, err := loadAPIConfigFile(configFile)
+		if err != nil {
+			return nil, fmt.Errorf("SIMPLE_API_SERVER_API_CONFIG_FILE: %w", err)
+		}
+		if len(endpoints) == 0 {
+			return nil, errors.New("SIMPLE_API_SERVER_API_CONFIG_FILE: no path given")
+		}
+		return endpoints, nil
+	}
+
+	if pathList == "" {
+		pathList = defaultPath
+	}
+	endpoints, err := parseEndpointList("SIMPLE_API_SERVER_PATH_LIST", pathList)
+	if err != nil {
+		return nil, err
+	}
+	if len(endpoints) == 0 {
+		return nil, errors.New("SIMPLE_API_SERVER_PATH_LIST: no path given")
+	}
+	return endpoints, nil
 }
 
 func parsePathList(key, raw string) ([]string, error) {
@@ -228,6 +264,176 @@ func parseStatus(raw string) (int, error) {
 	return status, nil
 }
 
+type apiConfigFile struct {
+	APIs []apiConfigEntry `yaml:"apis"`
+}
+
+type apiConfigEntry struct {
+	Path       string    `yaml:"path"`
+	StatusCode *int      `yaml:"statusCode"`
+	RespBody   yaml.Node `yaml:"respBody"`
+}
+
+func loadAPIConfigFile(file string) ([]endpoint, error) {
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+
+	var doc apiConfigFile
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+	if err := dec.Decode(&doc); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("%s: holds no YAML document", file)
+		}
+		return nil, fmt.Errorf("%s: %w", file, err)
+	}
+	if err := dec.Decode(new(apiConfigFile)); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("%s: must hold a single YAML document", file)
+	}
+
+	seen := map[string]bool{}
+	endpoints := make([]endpoint, 0, len(doc.APIs))
+	for _, entry := range doc.APIs {
+		ep, err := parseAPIConfigEntry(entry)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", file, err)
+		}
+		if seen[ep.Path] {
+			return nil, fmt.Errorf("%s: path %q is listed more than once", file, ep.Path)
+		}
+		seen[ep.Path] = true
+		endpoints = append(endpoints, ep)
+	}
+	return endpoints, nil
+}
+
+func parseAPIConfigEntry(entry apiConfigEntry) (endpoint, error) {
+	path, err := normalizePath(entry.Path)
+	if err != nil {
+		return endpoint{}, err
+	}
+
+	status := defaultStatus
+	if entry.StatusCode != nil {
+		if status = *entry.StatusCode; status < minStatus || status > maxStatus {
+			return endpoint{}, fmt.Errorf("path %q: status code %d must be an integer between %d and %d",
+				path, status, minStatus, maxStatus)
+		}
+	}
+
+	body, err := parseRespBody(&entry.RespBody)
+	if err != nil {
+		return endpoint{}, fmt.Errorf("path %q: %w", path, err)
+	}
+	if body != "" && !bodyAllowedForStatus(status) {
+		return endpoint{}, fmt.Errorf("path %q: respBody is set while status code %d carries no body", path, status)
+	}
+	return endpoint{Path: path, Status: status, Body: body}, nil
+}
+
+func parseRespBody(node *yaml.Node) (string, error) {
+	node = resolveAlias(node)
+	if node.Kind == 0 || node.Tag == "!!null" {
+		return "", nil
+	}
+	if node.Kind == yaml.ScalarNode {
+		var buf bytes.Buffer
+		if err := json.Compact(&buf, []byte(node.Value)); err != nil {
+			return "", fmt.Errorf("line %d: respBody is not valid JSON: %w", node.Line, err)
+		}
+		return buf.String(), nil
+	}
+	raw, err := appendJSONValue(nil, node, maxRespBodyDepth)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+func resolveAlias(node *yaml.Node) *yaml.Node {
+	for node.Kind == yaml.AliasNode && node.Alias != nil {
+		node = node.Alias
+	}
+	return node
+}
+
+func appendJSONValue(dst []byte, node *yaml.Node, depth int) ([]byte, error) {
+	node = resolveAlias(node)
+	if depth <= 0 {
+		return nil, fmt.Errorf("line %d: respBody is nested deeper than %d levels", node.Line, maxRespBodyDepth)
+	}
+	if len(dst) > maxRespBodyBytes {
+		return nil, fmt.Errorf("line %d: respBody expands beyond %d bytes", node.Line, maxRespBodyBytes)
+	}
+	switch node.Kind {
+	case yaml.ScalarNode:
+		return appendJSONScalar(dst, node)
+	case yaml.SequenceNode:
+		dst = append(dst, '[')
+		for i, item := range node.Content {
+			if i > 0 {
+				dst = append(dst, ',')
+			}
+			var err error
+			if dst, err = appendJSONValue(dst, item, depth-1); err != nil {
+				return nil, err
+			}
+		}
+		return append(dst, ']'), nil
+	case yaml.MappingNode:
+		return appendJSONObject(dst, node, depth)
+	}
+	return nil, fmt.Errorf("line %d: respBody holds an unsupported YAML value", node.Line)
+}
+
+func appendJSONObject(dst []byte, node *yaml.Node, depth int) ([]byte, error) {
+	dst = append(dst, '{')
+	seen := make(map[string]bool, len(node.Content)/2)
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		key, value := resolveAlias(node.Content[i]), node.Content[i+1]
+		if key.Kind != yaml.ScalarNode {
+			return nil, fmt.Errorf("line %d: an object key must be a scalar", key.Line)
+		}
+		if key.Tag == "!!merge" {
+			return nil, fmt.Errorf("line %d: respBody does not support the YAML merge key %q", key.Line, key.Value)
+		}
+		if seen[key.Value] {
+			return nil, fmt.Errorf("line %d: duplicate object key %q", key.Line, key.Value)
+		}
+		seen[key.Value] = true
+
+		if i > 0 {
+			dst = append(dst, ',')
+		}
+		encoded, err := json.Marshal(key.Value)
+		if err != nil {
+			return nil, fmt.Errorf("line %d: %w", key.Line, err)
+		}
+		dst = append(dst, encoded...)
+		dst = append(dst, ':')
+		if dst, err = appendJSONValue(dst, value, depth-1); err != nil {
+			return nil, err
+		}
+	}
+	return append(dst, '}'), nil
+}
+
+func appendJSONScalar(dst []byte, node *yaml.Node) ([]byte, error) {
+	var value any = node.Value
+	if node.Tag != "!!str" {
+		if err := node.Decode(&value); err != nil {
+			return nil, fmt.Errorf("line %d: %w", node.Line, err)
+		}
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("line %d: %q has no JSON representation: %w", node.Line, node.Value, err)
+	}
+	return append(dst, encoded...), nil
+}
+
 type apiResponse struct {
 	API    string `json:"API"`
 	Status int    `json:"status"`
@@ -238,7 +444,10 @@ func bodyAllowedForStatus(status int) bool {
 }
 
 func apiHandler(logger *log.Logger, ep endpoint) http.HandlerFunc {
-	body, _ := json.Marshal(apiResponse{API: ep.Path, Status: ep.Status})
+	body := []byte(ep.Body)
+	if ep.Body == "" {
+		body, _ = json.Marshal(apiResponse{API: ep.Path, Status: ep.Status})
+	}
 	body = append(body, '\n')
 	withBody := bodyAllowedForStatus(ep.Status)
 	return func(w http.ResponseWriter, r *http.Request) {
